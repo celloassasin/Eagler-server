@@ -2,26 +2,54 @@ const WebSocket = require("ws");
 
 const wss = new WebSocket.Server({ port: process.env.PORT || 8080 });
 
-console.log("BedWars server running");
+console.log("PvP Arena Server running");
 
-const matches = new Map();
+const queues = {
+    "1v1": [],
+    "2v2": [],
+    "3v3": [],
+    "4v4": [],
+    "ffa": []
+};
 
-function createMatch(mode) {
-    return {
-        mode,
-        players: [],
-        teams: {
-            red: { bed: true, players: [] },
-            blue: { bed: true, players: [] }
-        }
-    };
+const arenaList = [
+    "desert_ruins",
+    "sky_temple",
+    "lava_castle"
+];
+
+function startMatch(mode, players) {
+    const arena = arenaList[Math.floor(Math.random() * arenaList.length)];
+
+    players.forEach(p => {
+        p.send(JSON.stringify({
+            type: "match_start",
+            mode,
+            arena
+        }));
+    });
+
+    console.log(`Started ${mode} on ${arena}`);
+}
+
+function tryMatch(mode) {
+    const q = queues[mode];
+
+    const needed = {
+        "1v1": 2,
+        "2v2": 4,
+        "3v3": 6,
+        "4v4": 8,
+        "ffa": 6
+    }[mode];
+
+    if (q.length >= needed) {
+        const players = q.splice(0, needed);
+        startMatch(mode, players);
+    }
 }
 
 wss.on("connection", (ws) => {
-    ws.id = Math.random().toString(36).slice(2);
-    ws.match = null;
-    ws.team = null;
-
     ws.send(JSON.stringify({ type: "connected" }));
 
     ws.on("message", (msg) => {
@@ -32,79 +60,21 @@ wss.on("connection", (ws) => {
             return;
         }
 
-        // JOIN MATCH
-        if (data.type === "join_bedwars") {
-            const match = createMatch("bedwars");
-            matches.set(ws.id, match);
+        // JOIN QUEUE
+        if (data.type === "queue") {
+            if (!queues[data.mode]) return;
 
-            ws.match = match;
-
-            const team = match.teams.red.players.length <= match.teams.blue.players.length
-                ? "red"
-                : "blue";
-
-            ws.team = team;
-            match.teams[team].players.push(ws);
-
-            ws.send(JSON.stringify({
-                type: "joined",
-                team
-            }));
+            queues[data.mode].push(ws);
+            tryMatch(data.mode);
         }
 
-        // BREAK BED
-        if (data.type === "break_bed") {
-            const match = ws.match;
-            if (!match) return;
-
-            const enemyTeam = ws.team === "red" ? "blue" : "red";
-            match.teams[enemyTeam].bed = false;
-
-            broadcast(match, {
-                type: "bed_destroyed",
-                team: enemyTeam
-            });
+        // SIMPLE ACTIONS (placeholder combat sync)
+        if (data.type === "hit") {
+            ws.send(JSON.stringify({ type: "hit_confirmed" }));
         }
 
-        // PLAYER DEATH
         if (data.type === "death") {
-            const match = ws.match;
-            if (!match) return;
-
-            const teamData = match.teams[ws.team];
-
-            if (teamData.bed) {
-                ws.send(JSON.stringify({
-                    type: "respawn"
-                }));
-            } else {
-                ws.send(JSON.stringify({
-                    type: "eliminated"
-                }));
-            }
-
-            checkWin(match);
+            ws.send(JSON.stringify({ type: "respawn" }));
         }
     });
 });
-
-function broadcast(match, data) {
-    for (let team in match.teams) {
-        for (let p of match.teams[team].players) {
-            p.send(JSON.stringify(data));
-        }
-    }
-}
-
-function checkWin(match) {
-    const redAlive = match.teams.red.players.length;
-    const blueAlive = match.teams.blue.players.length;
-
-    if (redAlive === 0) {
-        broadcast(match, { type: "win", team: "blue" });
-    }
-
-    if (blueAlive === 0) {
-        broadcast(match, { type: "win", team: "red" });
-    }
-}
