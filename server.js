@@ -2,24 +2,52 @@ const WebSocket = require("ws");
 
 const wss = new WebSocket.Server({ port: process.env.PORT || 8080 });
 
-console.log("Rivals Server running");
+console.log("Rivals Full Server Running");
 
 const world = {
-    claims: {}, // chunkId -> team
-    players: {}, // playerId -> team
-    scores: {
-        red: 0,
-        blue: 0
-    }
+    claims: {},   // chunkId -> team
+    chunks: {},   // chunkId -> blocks
 };
+
+const economy = {
+    red: 0,
+    blue: 0
+};
+
+const players = {}; // id -> team
 
 function getChunk(x, z) {
     return `${Math.floor(x / 10)}:${Math.floor(z / 10)}`;
 }
 
+function broadcast(data) {
+    wss.clients.forEach(c => {
+        if (c.readyState === 1) {
+            c.send(JSON.stringify(data));
+        }
+    });
+}
+
+//
+// 💰 ECONOMY LOOP (passive income from land)
+//
+setInterval(() => {
+    for (let chunk in world.claims) {
+        const team = world.claims[chunk];
+        if (team) economy[team] += 1;
+    }
+
+    broadcast({
+        type: "economy_update",
+        economy
+    });
+
+}, 5000);
+
 wss.on("connection", (ws) => {
     ws.id = Math.random().toString(36).slice(2);
     ws.team = null;
+    ws.raidMode = false;
 
     ws.send(JSON.stringify({ type: "connected" }));
 
@@ -31,23 +59,52 @@ wss.on("connection", (ws) => {
             return;
         }
 
-        // JOIN TEAM (LOCKED FOREVER)
+        //
+        // 🏳️ JOIN TEAM (LOCKED PERMANENTLY)
+        //
         if (data.type === "join_team") {
-            if (world.players[ws.id]) return; // cannot switch
+            if (players[ws.id]) return;
 
-            const team = data.team; // "red" or "blue"
-            world.players[ws.id] = team;
-            ws.team = team;
+            players[ws.id] = data.team;
+            ws.team = data.team;
 
             ws.send(JSON.stringify({
                 type: "team_joined",
-                team
+                team: ws.team
             }));
-
-            console.log(`${ws.id} joined ${team}`);
         }
 
-        // CLAIM LAND
+        //
+        // 🏗️ BASE BUILDING (place blocks in owned land)
+        //
+        if (data.type === "place_block") {
+            if (!ws.team) return;
+
+            const chunk = getChunk(data.x, data.z);
+
+            if (world.claims[chunk] && world.claims[chunk] !== ws.team) return;
+
+            if (!world.chunks[chunk]) world.chunks[chunk] = [];
+
+            world.chunks[chunk].push({
+                x: data.x,
+                y: data.y,
+                z: data.z,
+                type: data.block
+            });
+
+            broadcast({
+                type: "block_place",
+                x: data.x,
+                y: data.y,
+                z: data.z,
+                block: data.block
+            });
+        }
+
+        //
+        // 🗺️ CLAIM LAND
+        //
         if (data.type === "claim_land") {
             if (!ws.team) return;
 
@@ -55,53 +112,70 @@ wss.on("connection", (ws) => {
 
             world.claims[chunk] = ws.team;
 
-            world.scores[ws.team]++;
-
             broadcast({
                 type: "land_claimed",
                 chunk,
-                team: ws.team,
-                scores: world.scores
+                team: ws.team
             });
         }
 
-        // ATTACK CLAIM (simple war mechanic)
-        if (data.type === "attack_chunk") {
-            const chunk = getChunk(data.x, data.z);
+        //
+        // ⚔️ START RAID MODE
+        //
+        if (data.type === "start_raid") {
+            ws.raidMode = true;
 
+            broadcast({
+                type: "raid_started",
+                team: ws.team
+            });
+        }
+
+        //
+        // ⚔️ ATTACK / TAKEOVER (only during raids)
+        //
+        if (data.type === "attack_chunk") {
+            if (!ws.raidMode) return;
+
+            const chunk = getChunk(data.x, data.z);
             const owner = world.claims[chunk];
 
-            if (owner && owner !== ws.team) {
-                world.claims[chunk] = ws.team;
+            if (!owner || owner === ws.team) return;
 
-                world.scores[ws.team]++;
-                world.scores[owner]--;
+            world.claims[chunk] = ws.team;
+
+            broadcast({
+                type: "chunk_taken",
+                chunk,
+                newOwner: ws.team
+            });
+        }
+
+        //
+        // 🗺️ REQUEST MAP DATA (for minimap UI later)
+        //
+        if (data.type === "request_map") {
+            ws.send(JSON.stringify({
+                type: "map_data",
+                claims: world.claims
+            }));
+        }
+
+        //
+        // 💰 UPGRADES (simple economy spending)
+        //
+        if (data.type === "upgrade") {
+            const cost = 10;
+
+            if (economy[ws.team] >= cost) {
+                economy[ws.team] -= cost;
 
                 broadcast({
-                    type: "chunk_taken",
-                    chunk,
-                    newOwner: ws.team,
-                    scores: world.scores
+                    type: "upgrade_success",
+                    team: ws.team
                 });
             }
         }
 
-        // PLAYER MOVE (optional tracking)
-        if (data.type === "move") {
-            ws.x = data.x;
-            ws.z = data.z;
-        }
-    });
-
-    ws.on("close", () => {
-        // players stay in world permanently (Rivals concept)
     });
 });
-
-function broadcast(data) {
-    wss.clients.forEach(client => {
-        if (client.readyState === 1) {
-            client.send(JSON.stringify(data));
-        }
-    });
-}
